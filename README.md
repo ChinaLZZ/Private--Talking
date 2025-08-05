@@ -1,4 +1,4 @@
- Private Talking Chat
+ \# Private Talking Chat
 
 一个功能完整的Python聊天软件，支持多客户端连接、私聊、群聊、文件传输、隐私模式等功能。
 
@@ -194,6 +194,7 @@ python client.py
 
 
 如有问题或建议，请通过GitHub Issues联系。 
+
 
 
 
