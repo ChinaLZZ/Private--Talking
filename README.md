@@ -30,8 +30,9 @@
 
 1. 安装依赖
 ```bash
-# 项目使用Python标准库，无需额外安装依赖
+# 项目使用Python标准库
 # 确保Python 3.6+已安装
+pip install pycryptodome
 ```
 
  2. 启动服务器
@@ -194,6 +195,7 @@ python client.py
 
 
 如有问题或建议，请通过GitHub Issues联系。 
+
 
 
 
