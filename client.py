@@ -7,9 +7,15 @@ import base64
 import os
 import datetime
 from tkinter import font as tkfont
+from Crypto.PublicKey import RSA
+from Crypto import Random
+from Crypto.Cipher import PKCS1_v1_5
+import base64
 
-# 1. 简易异或加密/解密工具
 
+# 1. 加密/解密工具
+
+#旧异或
 def xor_crypt(data, key=0x5A):
     if isinstance(data, str):
         data = data.encode('utf-8')
@@ -19,6 +25,31 @@ def xor_decrypt(data, key=0x5A):
     if isinstance(data, str):
         data = data.encode('latin1')
     return bytes([b ^ key for b in data]).decode('utf-8')
+
+#RSA
+
+def rsa_init():
+    random_generator = Random.new().read
+    rsa = RSA.generate(2048, random_generator)
+    private_key = rsa.exportKey().decode('utf-8')
+    public_key = rsa.publickey().exportKey().decode('utf-8')
+    return (private_key,public_key)
+
+def rsa_encrypt(message, public_key):
+    public_key = bytes(public_key, encoding='utf-8')
+    rsa_key = RSA.importKey(public_key)
+    cipher = PKCS1_v1_5.new(rsa_key)
+    encrypted_message = base64.b64encode(cipher.encrypt(message.encode("utf-8")))
+    return str(encrypted_message.decode("utf-8"))
+
+def rsa_decrypt(encrypted_message, private_key):
+    private_key = bytes(private_key, encoding='utf-8')
+    rsa_key = RSA.importKey(private_key)
+    cipher = PKCS1_v1_5.new(rsa_key)
+    decrypted_message = cipher.decrypt(base64.b64decode(encrypted_message), Random.new().read)
+    return str(decrypted_message.decode("utf-8"))
+
+
 
 class ChatClient:
     def __init__(self):
@@ -35,9 +66,17 @@ class ChatClient:
         self.is_connected = False
         self.is_private_mode = False
         
+        #客户端RSA公钥/密钥
+        self.public_key = ''
+        self.private_key = ''
+        
+        #服务端RSA公钥/密钥
+        self.spublic_key = ""
+        self.sprivate_key = ""
+        
         # 聊天记录
         self.chat_history = {}  # {username: [messages]}
-        
+        self.group_chat_history = {}
         # 在线用户和群组
         self.online_users = []
         self.groups = []
@@ -278,15 +317,20 @@ class ChatClient:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((self.server_ip, 5000))
             
+            key = rsa_init()
+            self.private_key = key[0]
+            self.public_key = key[1]
+            
             # 发送连接信息
             connection_info = {
                 'username': self.username,
-                'language': self.language
+                'language': self.language,
+                'rsa_key' : self.public_key
             }
             self.socket.send(json.dumps(connection_info).encode('utf-8'))
-            
+            print(connection_info)
             # 接收服务器响应
-            response = self.socket.recv(1024).decode('utf-8')
+            response = self.socket.recv(8192).decode('utf-8')
             response_data = json.loads(response)
             
             if response_data['type'] == 'connection_success':
@@ -307,8 +351,12 @@ class ChatClient:
                 self.receive_thread.daemon = True
                 self.receive_thread.start()
                 
+                #获取对方服务器私钥
+                self.sprivate_key = response_data.get('rsa_key')
+                
                 messagebox.showinfo("成功", self.languages[self.language]['connection_success'])
                 self.start_connectivity_check()
+                
                 
             elif response_data['type'] == 'error':
                 messagebox.showerror("错误", response_data['message'])
@@ -343,7 +391,7 @@ class ChatClient:
         """接收服务器消息"""
         while self.is_connected:
             try:
-                data = self.socket.recv(4096).decode('utf-8')
+                data = self.socket.recv(8192).decode('utf-8')
                 if not data:
                     break
                 
@@ -380,7 +428,7 @@ class ChatClient:
         """处理私聊消息"""
         sender = message_data['sender']
         # 自动解密消息内容
-        message = xor_decrypt(message_data['message'])
+        message = rsa_decrypt(message_data['message'],self.sprivate_key)
         is_private = message_data.get('is_private', False)
         timestamp = message_data.get('timestamp', '')
         
@@ -562,7 +610,7 @@ class ChatClient:
             message_data = {
                 'type': 'private_message',
                 'receiver': receiver,
-                'message': xor_crypt(message),
+                'message': rsa_encrypt(message,self.public_key),
                 'is_private': self.private_mode_var.get()
             }
             # 本地记录
@@ -570,7 +618,7 @@ class ChatClient:
                 self.chat_history[receiver] = []
             self.chat_history[receiver].append({
                 'sender': self.username,
-                'message': xor_crypt(message),
+                'message': rsa_encrypt(message,self.public_key),
                 'timestamp': datetime.datetime.now().isoformat(),
                 'is_private': self.private_mode_var.get()
             })
@@ -579,14 +627,14 @@ class ChatClient:
             message_data = {
                 'type': 'group_message',
                 'group_name': 'public',
-                'message': xor_crypt(message)
+                'message': rsa_encrypt(message,self.public_key)
             }
             # 本地记录
             if 'public' not in self.group_chat_history:
                 self.group_chat_history['public'] = []
             self.group_chat_history['public'].append({
                 'sender': self.username,
-                'message': xor_crypt(message),
+                'message': rsa_encrypt(message,self.public_key),
                 'timestamp': datetime.datetime.now().isoformat()
             })
         try:
@@ -735,7 +783,7 @@ class ChatClient:
                 parts = line.split(': ', 1)
                 if len(parts) == 2:
                     prefix, enc = parts
-                    dec = xor_decrypt(enc.strip())
+                    dec = rsa_decrypt(enc.strip(),self.sprivate_key)
                     self.chat_display.insert(tk.END, f"[解密]{prefix}: {dec}\n")
             except Exception:
                 continue
