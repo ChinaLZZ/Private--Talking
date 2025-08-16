@@ -7,3 +7,4 @@ os
 base64
 hashlib
 sqlite3 
+pycryptodome

@@ -8,9 +8,15 @@ import base64
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog
 from collections import defaultdict
+from Crypto.PublicKey import RSA
+from Crypto import Random
+from Crypto.Cipher import PKCS1_v1_5
+import base64
 
-# 1. 简易异或加密/解密工具
 
+# 1. 加密/解密工具
+
+#旧异或
 def xor_crypt(data, key=0x5A):
     if isinstance(data, str):
         data = data.encode('utf-8')
@@ -20,6 +26,30 @@ def xor_decrypt(data, key=0x5A):
     if isinstance(data, str):
         data = data.encode('latin1')
     return bytes([b ^ key for b in data]).decode('utf-8')
+
+#RSA
+
+def rsa_init():
+    random_generator = Random.new().read
+    rsa = RSA.generate(2048, random_generator)
+    private_key = rsa.exportKey().decode('utf-8')
+    public_key = rsa.publickey().exportKey().decode('utf-8')
+    return (private_key,public_key)
+
+def rsa_encrypt(message, public_key):
+    public_key = bytes(public_key, encoding='utf-8')
+    rsa_key = RSA.importKey(public_key)
+    cipher = PKCS1_v1_5.new(rsa_key)
+    encrypted_message = base64.b64encode(cipher.encrypt(message.encode("utf-8")))
+    return str(encrypted_message.decode("utf-8"))
+
+def rsa_decrypt(encrypted_message, private_key):
+    private_key = bytes(private_key, encoding='utf-8')
+    rsa_key = RSA.importKey(private_key)
+    cipher = PKCS1_v1_5.new(rsa_key)
+    decrypted_message = cipher.decrypt(base64.b64decode(encrypted_message), Random.new().read)
+    return str(decrypted_message.decode("utf-8"))
+
 
 class ChatServer:
     def __init__(self, host='0.0.0.0', port=5000):
@@ -41,6 +71,12 @@ class ChatServer:
         self.users_listbox = None
         self.chat_sessions_listbox = None
         self.status_label = None
+        
+        #服务端RSA公钥/密钥
+        self.public_key = ''
+        self.private_key = ''
+        
+        
         
         # 数据库初始化
         self.init_database()
@@ -276,6 +312,11 @@ class ChatServer:
             
             # 启动GUI主循环
             self.root.mainloop()
+            
+            #RSA密钥生成
+            key = rsa_init()
+            self.public_key = key[1]
+            self.private_key = key[0]
                 
         except Exception as e:
             print(f"服务器错误: {e}")
@@ -298,10 +339,12 @@ class ChatServer:
         """处理客户端连接"""
         try:
             # 接收客户端信息
-            data = client_socket.recv(1024).decode('utf-8')
+            data = client_socket.recv(8192).decode('utf-8')
             client_info = json.loads(data)
             username = client_info['username']
+            key = client_info['rsa_key']
             language = client_info.get('language', 'cn')
+            
             
             # 检查用户名是否已存在
             if username in self.clients:
@@ -311,7 +354,7 @@ class ChatServer:
                 return
             
             # 添加客户端到列表
-            self.clients[username] = (client_socket, address)
+            self.clients[username] = (client_socket, address,key)
             self.client_sockets[client_socket] = username
             
             # 更新用户状态
@@ -325,10 +368,11 @@ class ChatServer:
             response = {
                 'type': 'connection_success',
                 'message': '连接成功',
-                'online_users': list(self.clients.keys())
+                'online_users': list(self.clients.keys()),
+                'rsa_key' : self.public_key
             }
             client_socket.send(json.dumps(response).encode('utf-8'))
-            
+            print(response)
             # 广播用户上线消息
             self.broadcast_user_status(username, 'online')
             
@@ -341,7 +385,7 @@ class ChatServer:
             # 处理客户端消息
             while True:
                 try:
-                    data = client_socket.recv(4096).decode('utf-8')
+                    data = client_socket.recv(8192).decode('utf-8')
                     if not data:
                         break
                     
@@ -407,13 +451,13 @@ class ChatServer:
         receiver = message_data.get('receiver')
         message = message_data.get('message')
         is_private = message_data.get('is_private', False)
-        
+        message = message.rsa_decrypt(message,self.private_key)
         if receiver in self.clients:
             # 发送给接收者
             response = {
                 'type': 'private_message',
                 'sender': sender,
-                'message': message,
+                'message': rsa_encrypt(message,self.clients[receiver][2]),
                 'is_private': is_private,
                 'timestamp': datetime.datetime.now().isoformat()
             }
@@ -428,7 +472,7 @@ class ChatServer:
             self.clients[sender][0].send(json.dumps(confirm).encode('utf-8'))
             
             # 记录消息到数据库
-            self.log_message(sender, receiver, message, 'text', is_private)
+            self.log_message(sender, receiver, xor_crypt(message), 'text', is_private)
             
             # 记录到聊天会话
             session_key = tuple(sorted([sender, receiver]))
@@ -449,16 +493,16 @@ class ChatServer:
     def handle_public_message(self, sender, message_data):
         """处理公共消息"""
         message = message_data.get('message')
-        
+        message = message.rsa_decrypt(message,self.private_key)
         # 发送给所有在线用户
-        response = {
-            'type': 'public_message',
-            'sender': sender,
-            'message': message,
-            'timestamp': datetime.datetime.now().isoformat()
-        }
         
-        for username, (client_socket, _) in self.clients.items():
+        for username, (client_socket, _,key) in self.clients.items():
+            response = {
+                'type': 'public_message',
+                'sender': sender,
+                'message': rsa_encrypt(message,key),
+                'timestamp': datetime.datetime.now().isoformat()
+            }
             if username != sender:
                 try:
                     client_socket.send(json.dumps(response).encode('utf-8'))
@@ -536,11 +580,18 @@ class ChatServer:
                     del self.group_requests[group_name]
     
     def broadcast_message(self, message, exclude_username=None):
-        """广播消息给所有客户端"""
-        for username, (client_socket, _) in self.clients.items():
+        """广播消息给所有客户端，添加RSA加密"""
+        message_content = message.get('message', '')
+        for username, (client_socket, _, key) in self.clients.items():
             if username != exclude_username:
                 try:
-                    client_socket.send(json.dumps(message).encode('utf-8'))
+                    if message_content:
+                        encrypted_msg = message.copy()
+                        encrypted_msg['message'] = rsa_encrypt(message_content, key)
+                    else:
+                        encrypted_msg = message
+                        
+                    client_socket.send(json.dumps(encrypted_msg).encode('utf-8'))
                 except Exception as e:
                     print(f"发送消息给 {username} 失败: {e}")
 
